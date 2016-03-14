@@ -13,14 +13,20 @@ Module.preRun = [function() {
 }];
 
 Module.postRun = [function() {
-    Module.addColorFrame("red");
-    Module.addColorFrame("green");
-    Module.addColorFrame("blue");
-    Module.showRecording(Module.finishRecording());
+    setTimeout(function() {
+        Module.addColorFrame("red");
+        setTimeout(function() {
+            Module.addColorFrame("green");
+            setTimeout(function() {
+                Module.addColorFrame("blue");
+                Module.showRecording(Module.finishRecording());
+            }, 0);
+        }, 0);
+    }, 0);
 }];
 
 Module["addColorFrame"] = function(color) {
-    var dim = 256*256*4;
+    var dim = 320*240*4;
     for(var t = 0; t < 30; t++) {
         var clr = new Uint8Array(dim);
         for(var i = 0; i < clr.length; i+=4) {
@@ -54,14 +60,14 @@ Module["finishRecording"] = function() {
 
 Module["showRecording"] = function(data) {
     var v = document.createElement("video");
-    v.src = "data:video/mp4;base64,"+btoa(String.fromCharCode.apply(null, data));
+    v.src = "data:video/mp4;base64,"+base64js.fromByteArray(data);
     v.controls = true;
     v.style.width = "256px";
     v.style.height = "256px";
     document.body.appendChild(v);
     var a = document.createElement("a");
     a.text = "Download video";
-    a.download = "recording-1.mp4";
+    a.setAttribute("download", "recording-1.mp4");
     a.href = v.src;
     document.body.appendChild(a);
 }

@@ -87,6 +87,9 @@ static void add_video_stream(OutputStream *ost, AVFormatContext *oc, enum AVCode
 	ost->st = avformat_new_stream(oc, NULL);
 
 	c = avcodec_alloc_context3(codec);
+	
+	av_opt_set(c->priv_data, "preset", "ultrafast", 0);
+	av_opt_set(c->priv_data, "tune", "animation", 0);
 
 	ost->enc = c;
 
