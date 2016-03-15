@@ -133,7 +133,7 @@ static AVFrame *rgba_to_yuv(OutputStream *ost, unsigned char *rgba)
 	const uint8_t * inData[1] = { rgba };
 	const int inLinesize[1] = { 4 * c->width };
 	sws_scale(ost->sws_ctx, inData, inLinesize, 0, c->height, 
-	          ost->frame->data, ost->frame->linesize);
+			  ost->frame->data, ost->frame->linesize);
 
 	ost->frame->pts = ost->next_pts++;
 
@@ -183,19 +183,12 @@ int encoding_video = 1;
 int encoding_audio = 0;
 int finished = 0;
 
-void main_loop() {
-	if(finished) {
-		emscripten_cancel_main_loop();
-		emscripten_force_exit(0);
-	}
-}
-
-void add_video_frame(unsigned char*rgba, int len) {
+void add_video_frame(int recording, unsigned char*rgba, int len) {
 	assert(!finished);
 	encoding_video = write_video_frame(oc, &video_st, rgba);
 }
 
-void add_audio_frame(unsigned char*bytes, int len) {
+void add_audio_frame(int recording, unsigned char*bytes, int len) {
 	assert(!finished);
 	//assert(encoding_audio);
 	// (!encode_audio || av_compare_ts(video_st.next_pts, video_st.enc->time_base,
@@ -203,7 +196,7 @@ void add_audio_frame(unsigned char*bytes, int len) {
 	//else: encode_audio = !process_audio_stream(oc, &audio_st);
 }
 
-void end_recording() {
+void end_recording(int recording) {
 	finished = 1;
 	while(encoding_video) {
 		encoding_video = write_video_frame(oc, &video_st, NULL);
@@ -218,9 +211,7 @@ void end_recording() {
 	avformat_free_context(oc);
 }
 
-int main(int argc, char *argv[]) {
-	int w = 320;
-	int h = 240;
+int start_recording(int w, int h) {
 	video_st.w = w;
 	video_st.h = h;
 	video_st.framerate = 30;
@@ -229,20 +220,23 @@ int main(int argc, char *argv[]) {
 	fmt = av_guess_format("mp4", NULL, NULL);
 	oc = avformat_alloc_context();
 	oc->oformat = fmt;
-	char *filename = "recording-1.mp4";
-	snprintf(oc->filename, sizeof(oc->filename), "%s", filename);
+	snprintf(oc->filename, sizeof(oc->filename), "recording-%d.mp4", 0);
 	add_video_stream(&video_st, oc, fmt->video_codec);
 	open_video(oc, &video_st);
-	av_dump_format(oc, 0, filename, 1);
+	av_dump_format(oc, 0, oc->filename, 1);
 	
 	if (!(fmt->flags & AVFMT_NOFILE)) {
-		if (avio_open(&oc->pb, filename, AVIO_FLAG_WRITE) < 0) {
-			fprintf(stderr, "Could not open '%s'\n", filename);
-			return 1;
+		if (avio_open(&oc->pb, oc->filename, AVIO_FLAG_WRITE) < 0) {
+				fprintf(stderr, "Could not open '%s'\n", oc->filename);
+				return 1;
 		}
 	}
-	
 	avformat_write_header(oc, NULL);
-	emscripten_set_main_loop(main_loop, video_st.framerate, 1);
+	return 0;
+}
+
+int main(int argc, char *argv[]) {
+	printf("Starting!\n");
+	emscripten_exit_with_live_runtime();
 	return 0;
 }
