@@ -4,7 +4,7 @@ CC=emcc
 ODIR=build/obj
 LDIR=./deps/lib
 
-CFLAGS=-I$(IDIR) -L$(LDIR) -O2
+CFLAGS=-I$(IDIR) -L$(LDIR) -O3
 
 LIBS=deps/lib/libavformat.a deps/lib/libavcodec.a deps/lib/libavresample.a deps/lib/libswscale.a deps/lib/libavutil.a deps/lib/libx264.so deps/lib/libz.a
 
@@ -24,4 +24,4 @@ recorder.js: $(OBJ) pre.js worker-pre.js worker-post.js
 .PHONY: clean
 
 clean:
-	rm -f $(ODIR)/*.o *~ core $(INCDIR)/*~ emr.js emr.html
+	rm -f $(ODIR)/*.o *~ core $(INCDIR)/*~ recorder.js recorder.js.mem

@@ -17,15 +17,29 @@ typedef struct OutputStream {
 	AVStream *st;
 	AVCodecContext *enc;
 
-	int64_t next_pts;
+	unsigned long next_pts;
 
 	AVFrame *frame;
 
 	float t, tincr, tincr2;
 
 	struct SwsContext *sws_ctx;
-//	AVAudioResampleContext *avr;
+	AVAudioResampleContext *avr;
 } OutputStream;
+
+typedef struct Recording {
+	int recordingID;
+	OutputStream video_st, audio_st;
+	AVOutputFormat *fmt;
+	AVFormatContext *oc;
+	int encoding_video;
+	int encoding_audio;
+	int finished;
+} Recording;
+
+Recording *recordings;
+int next_recording = 0;
+int recording_count = 10;
 
 static AVFrame *alloc_picture(enum AVPixelFormat pix_fmt, int width, int height)
 {
@@ -70,10 +84,15 @@ static void open_video(AVFormatContext *oc, OutputStream *ost)
 static void close_stream(AVFormatContext *oc, OutputStream *ost)
 {
 	avcodec_free_context(&ost->enc);
+	ost->enc = NULL;
 	av_frame_free(&ost->frame);
+	ost->frame = NULL;
 	sws_freeContext(ost->sws_ctx);
-	//todo: put back
-	//avresample_free(&ost->avr);
+	ost->sws_ctx = NULL;
+	if(ost->avr != NULL) {
+		avresample_free(&ost->avr);
+	}
+	ost->avr = NULL;
 }
 
 static void add_video_stream(OutputStream *ost, AVFormatContext *oc, enum AVCodecID codec_id)
@@ -88,7 +107,7 @@ static void add_video_stream(OutputStream *ost, AVFormatContext *oc, enum AVCode
 
 	c = avcodec_alloc_context3(codec);
 	
-	av_opt_set(c->priv_data, "preset", "ultrafast", 0);
+	av_opt_set(c->priv_data, "preset", "superfast", 0);
 	av_opt_set(c->priv_data, "tune", "animation", 0);
 
 	ost->enc = c;
@@ -135,8 +154,6 @@ static AVFrame *rgba_to_yuv(OutputStream *ost, unsigned char *rgba)
 	sws_scale(ost->sws_ctx, inData, inLinesize, 0, c->height, 
 			  ost->frame->data, ost->frame->linesize);
 
-	ost->frame->pts = ost->next_pts++;
-
 	return ost->frame;
 }
 	
@@ -144,13 +161,16 @@ static int write_video_frame(AVFormatContext *oc, OutputStream *ost, unsigned ch
 {
 	int ret;
 	AVCodecContext *c;
-	AVFrame *frame;
+	AVFrame *frame = NULL;
 	AVPacket pkt   = { 0 };
 	int got_packet = 0;
 
 	c = ost->enc;
-
-	frame = rgba_to_yuv(ost,rgba);
+	if(rgba) {
+		frame = rgba_to_yuv(ost,rgba);
+		ost->frame->pts = frame->pts = ost->next_pts;
+		ost->next_pts++;
+	}
 
 	av_init_packet(&pkt);
 	
@@ -163,8 +183,6 @@ static int write_video_frame(AVFormatContext *oc, OutputStream *ost, unsigned ch
 	if (got_packet) {
 		av_packet_rescale_ts(&pkt, c->time_base, ost->st->time_base);
 		pkt.stream_index = ost->st->index;
-
-		
 		ret = av_interleaved_write_frame(oc, &pkt);
 	}
 
@@ -176,67 +194,83 @@ static int write_video_frame(AVFormatContext *oc, OutputStream *ost, unsigned ch
 	return (frame || got_packet) ? 0 : 1;
 }
 
-AVOutputFormat *fmt;
-AVFormatContext *oc;
-OutputStream video_st = {0};
-int encoding_video = 1;
-int encoding_audio = 0;
-int finished = 0;
-
-void add_video_frame(int recording, unsigned char*rgba, int len) {
-	assert(!finished);
-	encoding_video = write_video_frame(oc, &video_st, rgba);
+void add_video_frame(int recording, long frame, unsigned char*rgba, int len) {
+	assert(!recordings[recording].finished);
+	assert(recordings[recording].encoding_video);
+	recordings[recording].video_st.next_pts = frame;
+	recordings[recording].encoding_video = !write_video_frame(recordings[recording].oc, &recordings[recording].video_st, rgba);
 }
 
 void add_audio_frame(int recording, unsigned char*bytes, int len) {
-	assert(!finished);
-	//assert(encoding_audio);
+	assert(!recordings[recording].finished);
+	assert(recordings[recording].encoding_audio);
 	// (!encode_audio || av_compare_ts(video_st.next_pts, video_st.enc->time_base,
 	// audio_st.next_pts, audio_st.enc->time_base) <= 0)
 	//else: encode_audio = !process_audio_stream(oc, &audio_st);
 }
 
 void end_recording(int recording) {
-	finished = 1;
-	while(encoding_video) {
-		encoding_video = write_video_frame(oc, &video_st, NULL);
+	Recording r = recordings[recording];
+	assert(!r.finished);
+	r.finished = 1;
+	//write the delayed frames
+	while(r.encoding_video || r.encoding_audio) {
+		if(r.encoding_video) {
+			r.encoding_video = !write_video_frame(r.oc, &r.video_st, NULL);
+		} else if(r.encoding_audio) {
+			//todo
+		}
 	}
-	av_write_trailer(oc);
+	av_write_trailer(r.oc);
 
-	close_stream(oc, &video_st);
+	close_stream(r.oc, &r.video_st);
 
-	if (!(fmt->flags & AVFMT_NOFILE)) {
-		avio_close(oc->pb);
+	if (!(r.fmt->flags & AVFMT_NOFILE)) {
+		avio_close(r.oc->pb);
 	}
-	avformat_free_context(oc);
+	avformat_free_context(r.oc);
+	r.oc = NULL;
+	recordings[recording] = r;
 }
 
-int start_recording(int w, int h) {
-	video_st.w = w;
-	video_st.h = h;
-	video_st.framerate = 30;
+int start_recording(int w, int h, int fps) {
+	if(next_recording >= recording_count) {
+		recording_count *= 2;
+		recordings = realloc(recordings, recording_count*sizeof(Recording));
+	}
+	Recording r = {0};
+	r.recordingID = next_recording;
+	r.encoding_video = 1;
+	r.encoding_audio = 0;
+	r.finished = 0;
+	r.video_st.w = w;
+	r.video_st.h = h;
+	r.video_st.framerate = fps;
 	
 	av_register_all();
-	fmt = av_guess_format("mp4", NULL, NULL);
-	oc = avformat_alloc_context();
-	oc->oformat = fmt;
-	snprintf(oc->filename, sizeof(oc->filename), "recording-%d.mp4", 0);
-	add_video_stream(&video_st, oc, fmt->video_codec);
-	open_video(oc, &video_st);
-	av_dump_format(oc, 0, oc->filename, 1);
+	r.fmt = av_guess_format("mp4", NULL, NULL);
+	r.oc = avformat_alloc_context();
+	r.oc->oformat = r.fmt;
+	snprintf(r.oc->filename, sizeof(r.oc->filename), "recording-%d.mp4", r.recordingID);
+	add_video_stream(&r.video_st, r.oc, r.fmt->video_codec);
+	open_video(r.oc, &r.video_st);
+	av_dump_format(r.oc, 0, r.oc->filename, 1);
 	
-	if (!(fmt->flags & AVFMT_NOFILE)) {
-		if (avio_open(&oc->pb, oc->filename, AVIO_FLAG_WRITE) < 0) {
-				fprintf(stderr, "Could not open '%s'\n", oc->filename);
+	if (!(r.fmt->flags & AVFMT_NOFILE)) {
+		if (avio_open(&r.oc->pb, r.oc->filename, AVIO_FLAG_WRITE) < 0) {
+				fprintf(stderr, "Could not open '%s'\n", r.oc->filename);
 				return 1;
 		}
 	}
-	avformat_write_header(oc, NULL);
-	return 0;
+	avformat_write_header(r.oc, NULL);
+	recordings[next_recording] = r;
+	next_recording++;
+	return r.recordingID;
 }
 
 int main(int argc, char *argv[]) {
 	printf("Starting!\n");
+	recordings = calloc(recording_count, sizeof(Recording));
 	emscripten_exit_with_live_runtime();
 	return 0;
 }

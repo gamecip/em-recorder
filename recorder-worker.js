@@ -1,15 +1,20 @@
 var Recorder = {
+    recorderRoot:"",
     worker:null,
     ready:false,
     nonce:0,
     pendingCalls:[],
     pendingStarts:{},
-    pendingFinishes:{}
+    pendingFinishes:{},
+    
+    dataBatch:[],
+    batchedBuffers:[],
+    dataBatchThreshold:60
 };
 
 Recorder.spawnRecorder = function() {
     if(Recorder.worker) { return; }
-    Recorder.worker = new Worker("recorder.js");
+    Recorder.worker = new Worker(Recorder.recorderRoot+"recorder.js");
     Recorder.worker.onmessage = function(e) {
         var data = e.data;
         if(data.type == "ready") {
@@ -36,11 +41,11 @@ Recorder.spawnRecorder = function() {
     }
 };
 
-Recorder.startRecording = function(w,h,cb) {
+Recorder.startRecording = function(w,h,fps,cb) {
     if(!Recorder.worker || !Recorder.ready) {
         Recorder.spawnRecorder();
         Recorder.pendingCalls.push(function() {
-            Recorder.startRecording(w,h,cb);
+            Recorder.startRecording(w,h,fps,cb);
         });
         return;
     }
@@ -50,25 +55,41 @@ Recorder.startRecording = function(w,h,cb) {
         type:"start",
         width:w,
         height:h,
+        fps:fps,
         nonce:nonce
     });
 }
 
-Recorder.addVideoFrame = function(recordingID, imageData) {
+Recorder.addVideoFrame = function(recordingID, frame, imageData) {
     if(!Recorder.worker || !Recorder.ready) {
         console.error("Calling addVideoFrame too early");
     }
+    Recorder.dataBatch.push({
+        recordingID:recordingID,
+        frame:frame,
+        videoBuffer:imageData.buffer
+    });
+    Recorder.batchedBuffers.push(imageData.buffer);
+    if(Recorder.dataBatch.length >= Recorder.dataBatchThreshold) {
+        Recorder.flushDataBatches();
+    }
+}
+
+Recorder.flushDataBatches = function() {
+    if(Recorder.dataBatch.length == 0) { return; }
     Recorder.worker.postMessage({
         type:"data",
-        recordingID:recordingID,
-        videoBuffer:imageData.buffer
-    }, [imageData.buffer]);
+        messages:Recorder.dataBatch
+    }, Recorder.batchedBuffers);
+    Recorder.dataBatch = [];
+    Recorder.batchedBuffers = [];
 }
 
 Recorder.finishRecording = function(recordingID, cb) {
     if(!Recorder.worker || !Recorder.ready) {
         console.error("Calling finishRecording too early");
     }
+    Recorder.flushDataBatches();
     Recorder.pendingFinishes[recordingID] = cb;
     Recorder.worker.postMessage({
         type:"finish",
