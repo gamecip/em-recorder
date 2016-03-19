@@ -19,7 +19,7 @@ typedef struct OutputStream {
 
 	unsigned long next_pts;
 
-	AVFrame *frame;
+	AVFrame *frame, *tmp_frame;
 
 	float t, tincr, tincr2;
 
@@ -40,6 +40,207 @@ typedef struct Recording {
 Recording *recordings;
 int next_recording = 0;
 int recording_count = 10;
+
+//audio
+
+static void add_audio_stream(OutputStream *ost, AVFormatContext *oc,
+                             enum AVCodecID codec_id)
+{
+    AVCodecContext *c;
+    AVCodec *codec;
+    int ret;
+     // find the audio encoder
+    codec = avcodec_find_encoder(codec_id);
+    if (!codec) {
+        fprintf(stderr, "codec not found\n");
+        exit(1);
+    }
+    ost->st = avformat_new_stream(oc, NULL);
+    if (!ost->st) {
+        fprintf(stderr, "Could not alloc stream\n");
+        exit(1);
+    }
+    c = avcodec_alloc_context3(codec);
+    if (!c) {
+        fprintf(stderr, "Could not alloc an encoding context\n");
+        exit(1);
+    }
+    ost->enc = c;
+		c->strict_std_compliance = FF_COMPLIANCE_EXPERIMENTAL;
+     // put sample parameters
+    c->sample_fmt     = codec->sample_fmts           ? codec->sample_fmts[0]           : AV_SAMPLE_FMT_FLT;
+    c->sample_rate    = codec->supported_samplerates ? codec->supported_samplerates[0] : 16000;
+    c->channel_layout = codec->channel_layouts       ? codec->channel_layouts[0]       : AV_CH_LAYOUT_STEREO;
+    c->channels       = av_get_channel_layout_nb_channels(c->channel_layout);
+    c->bit_rate       = 32000;
+    ost->st->time_base = (AVRational){ 1, c->sample_rate };
+    // some formats want stream headers to be separate
+    if (oc->oformat->flags & AVFMT_GLOBALHEADER)
+        c->flags |= AV_CODEC_FLAG_GLOBAL_HEADER;
+     // initialize sample format conversion;
+     // * to simplify the code, we always pass the data through lavr, even
+     // * if the encoder supports the generated format directly -- the price is
+     // * some extra data copying;
+     //
+    ost->avr = avresample_alloc_context();
+    if (!ost->avr) {
+        fprintf(stderr, "Error allocating the resampling context\n");
+        exit(1);
+    }
+    av_opt_set_int(ost->avr, "in_sample_fmt",      AV_SAMPLE_FMT_FLT,   0);
+    av_opt_set_int(ost->avr, "in_sample_rate",     16000,               0);
+    av_opt_set_int(ost->avr, "in_channel_layout",  AV_CH_LAYOUT_STEREO, 0);
+    av_opt_set_int(ost->avr, "out_sample_fmt",     c->sample_fmt,       0);
+    av_opt_set_int(ost->avr, "out_sample_rate",    c->sample_rate,      0);
+    av_opt_set_int(ost->avr, "out_channel_layout", c->channel_layout,   0);
+    ret = avresample_open(ost->avr);
+    if (ret < 0) {
+        fprintf(stderr, "Error opening the resampling context\n");
+        exit(1);
+    }
+}
+static AVFrame *alloc_audio_frame(enum AVSampleFormat sample_fmt,
+                                  uint64_t channel_layout,
+                                  int sample_rate, int nb_samples)
+{
+    AVFrame *frame = av_frame_alloc();
+    int ret;
+    if (!frame) {
+        fprintf(stderr, "Error allocating an audio frame\n");
+        exit(1);
+    }
+    frame->format = sample_fmt;
+    frame->channel_layout = channel_layout;
+    frame->sample_rate = sample_rate;
+    frame->nb_samples = nb_samples;
+    if (nb_samples) {
+        ret = av_frame_get_buffer(frame, 0);
+        if (ret < 0) {
+            fprintf(stderr, "Error allocating an audio buffer\n");
+            exit(1);
+        }
+    }
+    return frame;
+}
+static void open_audio(AVFormatContext *oc, OutputStream *ost)
+{
+    AVCodecContext *c;
+    int nb_samples, ret;
+    c = ost->enc;
+     // open it
+		ret = avcodec_open2(c, NULL, NULL);
+    if (ret < 0) {
+        fprintf(stderr, "could not open codec: -%x : %d\n",-ret,ret);
+        exit(1);
+    }
+    if (c->codec->capabilities & AV_CODEC_CAP_VARIABLE_FRAME_SIZE)
+        nb_samples = 10000;
+    else
+        nb_samples = c->frame_size;
+    ost->frame     = alloc_audio_frame(c->sample_fmt, c->channel_layout,
+                                       c->sample_rate, nb_samples);
+    ost->tmp_frame = alloc_audio_frame(AV_SAMPLE_FMT_FLT, AV_CH_LAYOUT_STEREO,
+                                       ost->framerate, ost->framerate);
+     // copy the stream parameters to the muxer
+    ret = avcodec_parameters_from_context(ost->st->codecpar, c);
+    if (ret < 0) {
+        fprintf(stderr, "Could not copy the stream parameters\n");
+        exit(1);
+    }
+} 
+ // Prepare a 32 bit dummy audio frame of 'frame_size' samples and
+ // * 'nb_channels' channels.
+static AVFrame *get_audio_frame(OutputStream *ost, float_t *samples)
+{
+    AVFrame *frame = ost->tmp_frame;
+    int j, i, v;
+    float_t *q = (float_t*)frame->extended_data[0];
+    memcpy(q, samples, frame->nb_samples*sizeof(float_t));
+    return frame;
+}
+ // if a frame is provided, send it to the encoder, otherwise flush the encoder;
+ // * return 1 when encoding is finished, 0 otherwise
+ //
+static int encode_audio_frame(AVFormatContext *oc, OutputStream *ost,
+                              AVFrame *frame)
+{
+    AVPacket pkt = { 0 }; // data and size must be 0;
+    int got_packet;
+    av_init_packet(&pkt);
+    avcodec_encode_audio2(ost->enc, &pkt, frame, &got_packet);
+    if (got_packet) {
+        pkt.stream_index = ost->st->index;
+        av_packet_rescale_ts(&pkt, ost->enc->time_base, ost->st->time_base);
+         // Write the compressed frame to the media file.
+        if (av_interleaved_write_frame(oc, &pkt) != 0) {
+            fprintf(stderr, "Error while writing audio frame\n");
+            exit(1);
+        }
+    }
+    return (frame || got_packet) ? 0 : 1;
+}
+
+
+ //
+ // * encode one audio frame and send it to the muxer
+ // * return 1 when encoding is finished, 0 otherwise
+ //
+static int write_audio_frame(AVFormatContext *oc, OutputStream *ost, float_t* samples)
+{
+    AVFrame *frame = NULL;
+    int got_output = 0;
+    int ret;
+    if(samples) {
+        frame = get_audio_frame(ost,samples);
+    }
+    got_output |= !!frame;
+     // feed the data to lavr
+    if (frame) {
+        ret = avresample_convert(ost->avr, NULL, 0, 0,
+                                 frame->extended_data, frame->linesize[0],
+                                 frame->nb_samples);
+        if (ret < 0) {
+            fprintf(stderr, "Error feeding audio data to the resampler\n");
+            exit(1);
+        }
+    }
+    while ((frame && avresample_available(ost->avr) >= ost->frame->nb_samples) ||
+           (!frame && avresample_get_out_samples(ost->avr, 0))) {
+         // when we pass a frame to the encoder, it may keep a reference to it
+         // * internally;
+         // * make sure we do not overwrite it here
+         //
+        ret = av_frame_make_writable(ost->frame);
+        if (ret < 0)
+            exit(1);
+         // the difference between the two avresample calls here is that the
+         // * first one just reads the already converted data that is buffered in
+         // * the lavr output buffer, while the second one also flushes the
+         // * resampler
+        if (frame) {
+            ret = avresample_read(ost->avr, ost->frame->extended_data,
+                                  ost->frame->nb_samples);
+        } else {
+            ret = avresample_convert(ost->avr, ost->frame->extended_data,
+                                     ost->frame->linesize[0], ost->frame->nb_samples,
+                                     NULL, 0, 0);
+        }
+        if (ret < 0) {
+            fprintf(stderr, "Error while resampling\n");
+            exit(1);
+        } else if (frame && ret != ost->frame->nb_samples) {
+            fprintf(stderr, "Too few samples returned from lavr\n");
+            exit(1);
+        }
+        ost->frame->nb_samples = ret;
+        ost->frame->pts        = ost->next_pts;
+        ost->next_pts         += ost->frame->nb_samples;
+        got_output |= encode_audio_frame(oc, ost, ret ? ost->frame : NULL);
+    }
+    return !got_output;
+}
+
+//video
 
 static AVFrame *alloc_picture(enum AVPixelFormat pix_fmt, int width, int height)
 {
@@ -86,8 +287,11 @@ static void close_stream(AVFormatContext *oc, OutputStream *ost)
 	avcodec_free_context(&ost->enc);
 	ost->enc = NULL;
 	av_frame_free(&ost->frame);
+	av_frame_free(&ost->tmp_frame);
 	ost->frame = NULL;
-	sws_freeContext(ost->sws_ctx);
+	if(ost->sws_ctx) {
+		sws_freeContext(ost->sws_ctx);
+	}
 	ost->sws_ctx = NULL;
 	if(ost->avr != NULL) {
 		avresample_free(&ost->avr);
@@ -194,19 +398,18 @@ static int write_video_frame(AVFormatContext *oc, OutputStream *ost, unsigned ch
 	return (frame || got_packet) ? 0 : 1;
 }
 
-void add_video_frame(int recording, long frame, unsigned char*rgba, int len) {
+void add_video_frame(int recording, long frame, unsigned char*rgba) {
 	assert(!recordings[recording].finished);
 	assert(recordings[recording].encoding_video);
 	recordings[recording].video_st.next_pts = frame;
 	recordings[recording].encoding_video = !write_video_frame(recordings[recording].oc, &recordings[recording].video_st, rgba);
 }
 
-void add_audio_frame(int recording, unsigned char*bytes, int len) {
+void add_audio_frame(int recording, long frame, float_t*samples) {
 	assert(!recordings[recording].finished);
 	assert(recordings[recording].encoding_audio);
-	// (!encode_audio || av_compare_ts(video_st.next_pts, video_st.enc->time_base,
-	// audio_st.next_pts, audio_st.enc->time_base) <= 0)
-	//else: encode_audio = !process_audio_stream(oc, &audio_st);
+	recordings[recording].audio_st.next_pts = frame;
+	recordings[recording].encoding_audio = !write_audio_frame(recordings[recording].oc, &recordings[recording].audio_st, samples);
 }
 
 void end_recording(int recording) {
@@ -218,12 +421,13 @@ void end_recording(int recording) {
 		if(r.encoding_video) {
 			r.encoding_video = !write_video_frame(r.oc, &r.video_st, NULL);
 		} else if(r.encoding_audio) {
-			//todo
+			r.encoding_audio = !write_audio_frame(r.oc, &r.audio_st, NULL);
 		}
 	}
 	av_write_trailer(r.oc);
 
 	close_stream(r.oc, &r.video_st);
+	close_stream(r.oc, &r.audio_st);
 
 	if (!(r.fmt->flags & AVFMT_NOFILE)) {
 		avio_close(r.oc->pb);
@@ -233,7 +437,8 @@ void end_recording(int recording) {
 	recordings[recording] = r;
 }
 
-int start_recording(int w, int h, int fps) {
+int start_recording(int w, int h, int fps, int sps) {
+	printf("Started %d!\n",next_recording);
 	if(next_recording >= recording_count) {
 		recording_count *= 2;
 		recordings = realloc(recordings, recording_count*sizeof(Recording));
@@ -241,11 +446,12 @@ int start_recording(int w, int h, int fps) {
 	Recording r = {0};
 	r.recordingID = next_recording;
 	r.encoding_video = 1;
-	r.encoding_audio = 0;
+	r.encoding_audio = 1;
 	r.finished = 0;
 	r.video_st.w = w;
 	r.video_st.h = h;
 	r.video_st.framerate = fps;
+	r.audio_st.framerate = sps;
 	
 	av_register_all();
 	r.fmt = av_guess_format("mp4", NULL, NULL);
@@ -253,7 +459,9 @@ int start_recording(int w, int h, int fps) {
 	r.oc->oformat = r.fmt;
 	snprintf(r.oc->filename, sizeof(r.oc->filename), "recording-%d.mp4", r.recordingID);
 	add_video_stream(&r.video_st, r.oc, r.fmt->video_codec);
+	add_audio_stream(&r.audio_st, r.oc, r.fmt->audio_codec);
 	open_video(r.oc, &r.video_st);
+	open_audio(r.oc, &r.audio_st);
 	av_dump_format(r.oc, 0, r.oc->filename, 1);
 	
 	if (!(r.fmt->flags & AVFMT_NOFILE)) {
@@ -269,7 +477,6 @@ int start_recording(int w, int h, int fps) {
 }
 
 int main(int argc, char *argv[]) {
-	printf("Starting!\n");
 	recordings = calloc(recording_count, sizeof(Recording));
 	emscripten_exit_with_live_runtime();
 	return 0;

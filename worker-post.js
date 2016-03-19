@@ -1,10 +1,7 @@
-Module.postRun = [function() {
-    postMessage({type:"ready"});
-}]
 onmessage = function(e) {
     var data = e.data;
     if(data.type == "start") {
-        var rid = Module.startRecording(data.width, data.height, data.fps);
+        var rid = Module.startRecording(data.width, data.height, data.fps, data.sps);
         postMessage({
             type:"started",
             recordingID:rid,
@@ -22,9 +19,13 @@ onmessage = function(e) {
                     new Uint8Array(datum.videoBuffer)
                 );
             }
-            // if(datum.audioBuffer) {
-            //     Recorder.addAudioFrame(datum.recordingID, new Uint8Array(datum.audioBuffer));
-            // }
+            if(datum.audioBuffer) {
+                Module.addAudioFrame(
+                    datum.recordingID, 
+                    datum.frame, 
+                    new Float32Array(datum.audioBuffer)
+                );
+            }
         }
         console.log("Done!");
     } else if(data.type == "finish") {
@@ -36,3 +37,4 @@ onmessage = function(e) {
         }, [result.buffer]);
     }
 }
+postMessage({type:"ready"});
