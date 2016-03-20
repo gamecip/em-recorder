@@ -4,7 +4,7 @@ CC=emcc
 ODIR=build/obj
 LDIR=./deps/lib
 
-CFLAGS=-I$(IDIR) -L$(LDIR) -O0
+CFLAGS=-I$(IDIR) -L$(LDIR) -O3
 
 LIBS=deps/lib/libavformat.a deps/lib/libavcodec.a deps/lib/libavresample.a deps/lib/libswscale.a deps/lib/libavutil.a deps/lib/libx264.so deps/lib/libz.a
 
@@ -13,7 +13,7 @@ DEPS =
 _OBJ = main.o
 OBJ = $(patsubst %,$(ODIR)/%,$(_OBJ))
 
-EM_SETTINGS=-s WARN_ON_UNDEFINED_SYMBOLS=1 -s EXPORTED_FUNCTIONS="['_main', '_start_recording', '_add_video_frame', '_add_audio_frame', '_end_recording']" -s ALLOW_MEMORY_GROWTH=1 --pre-js pre.js
+EM_SETTINGS=-g0 -s WARN_ON_UNDEFINED_SYMBOLS=1 -s EXPORTED_FUNCTIONS="['_main', '_start_recording', '_add_video_frame', '_add_audio_frame', '_end_recording']" -s ALLOW_MEMORY_GROWTH=1 --pre-js pre.js
 
 $(ODIR)/%.o: %.c $(DEPS)
 	$(CC) -c -o $@ $< $(CFLAGS)

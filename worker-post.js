@@ -38,4 +38,9 @@ onmessage = function(e) {
         }, [result.buffer]);
     }
 }
-postMessage({type:"ready"});
+
+Module = Module || {};
+Module.postRun = Module.postRun || [];
+Module.postRun.push(function(){
+	postMessage({type:"ready"});
+});
