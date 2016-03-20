@@ -20,10 +20,11 @@ onmessage = function(e) {
                 );
             }
             if(datum.audioBuffer) {
+                var samples = new Float32Array(datum.audioBuffer);
                 Module.addAudioFrame(
                     datum.recordingID, 
                     datum.frame, 
-                    new Float32Array(datum.audioBuffer)
+                    samples
                 );
             }
         }

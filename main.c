@@ -68,7 +68,7 @@ static void add_audio_stream(OutputStream *ost, AVFormatContext *oc,
     ost->enc = c;
 		c->strict_std_compliance = FF_COMPLIANCE_EXPERIMENTAL;
      // put sample parameters
-    c->sample_fmt     = codec->sample_fmts           ? codec->sample_fmts[0]           : AV_SAMPLE_FMT_FLT;
+    c->sample_fmt     = codec->sample_fmts           ? codec->sample_fmts[0]           : AV_SAMPLE_FMT_S16;
     c->sample_rate    = codec->supported_samplerates ? codec->supported_samplerates[0] : 16000;
     c->channel_layout = codec->channel_layouts       ? codec->channel_layouts[0]       : AV_CH_LAYOUT_STEREO;
     c->channels       = av_get_channel_layout_nb_channels(c->channel_layout);
@@ -88,7 +88,7 @@ static void add_audio_stream(OutputStream *ost, AVFormatContext *oc,
         exit(1);
     }
     av_opt_set_int(ost->avr, "in_sample_fmt",      AV_SAMPLE_FMT_FLT,   0);
-    av_opt_set_int(ost->avr, "in_sample_rate",     16000,               0);
+    av_opt_set_int(ost->avr, "in_sample_rate",     ost->framerate,      0);
     av_opt_set_int(ost->avr, "in_channel_layout",  AV_CH_LAYOUT_STEREO, 0);
     av_opt_set_int(ost->avr, "out_sample_fmt",     c->sample_fmt,       0);
     av_opt_set_int(ost->avr, "out_sample_rate",    c->sample_rate,      0);
@@ -137,6 +137,7 @@ static void open_audio(AVFormatContext *oc, OutputStream *ost)
         nb_samples = 10000;
     else
         nb_samples = c->frame_size;
+    fprintf(stderr,"Open codec with sample rate %d sample count %d\n",(int)c->sample_rate,nb_samples);
     ost->frame     = alloc_audio_frame(c->sample_fmt, c->channel_layout,
                                        c->sample_rate, nb_samples);
     ost->tmp_frame = alloc_audio_frame(AV_SAMPLE_FMT_FLT, AV_CH_LAYOUT_STEREO,
@@ -155,7 +156,8 @@ static AVFrame *get_audio_frame(OutputStream *ost, float_t *samples)
     AVFrame *frame = ost->tmp_frame;
     int j, i, v;
     float_t *q = (float_t*)frame->extended_data[0];
-    memcpy(q, samples, frame->nb_samples*sizeof(float_t));
+    memcpy(q, samples, frame->nb_samples*sizeof(float_t)*2);
+    frame->pts = ost->next_pts;
     return frame;
 }
  // if a frame is provided, send it to the encoder, otherwise flush the encoder;
@@ -191,7 +193,7 @@ static int write_audio_frame(AVFormatContext *oc, OutputStream *ost, float_t* sa
     int got_output = 0;
     int ret;
     if(samples) {
-        frame = get_audio_frame(ost,samples);
+        frame = get_audio_frame(ost,samples);        
     }
     got_output |= !!frame;
      // feed the data to lavr
@@ -204,7 +206,7 @@ static int write_audio_frame(AVFormatContext *oc, OutputStream *ost, float_t* sa
             exit(1);
         }
     }
-    while ((frame && avresample_available(ost->avr) >= ost->frame->nb_samples) ||
+    while ((frame && avresample_available(ost->avr) >= ost->frame->nb_samples && ost->frame->nb_samples > 0) ||
            (!frame && avresample_get_out_samples(ost->avr, 0))) {
          // when we pass a frame to the encoder, it may keep a reference to it
          // * internally;
@@ -236,6 +238,10 @@ static int write_audio_frame(AVFormatContext *oc, OutputStream *ost, float_t* sa
         ost->frame->pts        = ost->next_pts;
         ost->next_pts         += ost->frame->nb_samples;
         got_output |= encode_audio_frame(oc, ost, ret ? ost->frame : NULL);
+        if(!got_output && ret == 0) { 
+            fprintf(stderr,"finished, next pts %d\n",(int)ost->next_pts);
+            break; 
+        }
     }
     return !got_output;
 }
@@ -406,10 +412,12 @@ void add_video_frame(int recording, long frame, unsigned char*rgba) {
 }
 
 void add_audio_frame(int recording, long frame, float_t*samples) {
-	assert(!recordings[recording].finished);
-	assert(recordings[recording].encoding_audio);
-	recordings[recording].audio_st.next_pts = frame;
-	recordings[recording].encoding_audio = !write_audio_frame(recordings[recording].oc, &recordings[recording].audio_st, samples);
+	Recording r = recordings[recording];
+	assert(!r.finished);
+	assert(r.encoding_audio);
+	r.audio_st.next_pts = av_rescale_q(frame,(AVRational){ 1, r.audio_st.framerate },r.audio_st.enc->time_base);
+	r.encoding_audio = !write_audio_frame(r.oc, &r.audio_st, samples);
+	recordings[recording] = r;
 }
 
 void end_recording(int recording) {
