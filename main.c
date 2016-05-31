@@ -12,7 +12,7 @@
 #define OUT_FMT	AV_PIX_FMT_YUV420P
 
 typedef struct OutputStream {
-	int w, h, framerate;
+	int w, h, framerate, bitrate;
 	
 	AVStream *st;
 	AVCodecContext *enc;
@@ -322,7 +322,7 @@ static void add_video_stream(OutputStream *ost, AVFormatContext *oc, enum AVCode
 
 	ost->enc = c;
 
-	c->bit_rate = 400000;
+	c->bit_rate = ost->bitrate;
 
 	c->width = ost->w;
 	c->height = ost->h;
@@ -445,7 +445,7 @@ void end_recording(int recording) {
 	recordings[recording] = r;
 }
 
-int start_recording(int w, int h, int fps, int sps) {
+int start_recording(int w, int h, int fps, int sps, int br) {
 	printf("Started %d!\n",next_recording);
 	if(next_recording >= recording_count) {
 		recording_count *= 2;
@@ -459,6 +459,7 @@ int start_recording(int w, int h, int fps, int sps) {
 	r.video_st.w = w;
 	r.video_st.h = h;
 	r.video_st.framerate = fps;
+	r.video_st.bitrate = br;
 	r.audio_st.framerate = sps;
 	
 	av_register_all();

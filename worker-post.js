@@ -1,7 +1,7 @@
 onmessage = function(e) {
     var data = e.data;
     if(data.type == "start") {
-        var rid = Module.startRecording(data.width, data.height, data.fps, data.sps);
+        var rid = Module.startRecording(data.width, data.height, data.fps, data.sps, data.br);
         postMessage({
             type:"started",
             recordingID:rid,

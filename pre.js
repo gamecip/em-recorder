@@ -6,7 +6,7 @@ Module.preRun = Module.preRun || [];
 Module.preRun.push(function() {
     console.log("PRERUN");
     //startRecording(w, h);
-    Module["startRecording"] = Module.cwrap("start_recording", "number", ["number", "number", "number", "number"]);
+    Module["startRecording"] = Module.cwrap("start_recording", "number", ["number", "number", "number", "number", "number"]);
     Module["addVideoFrame"] = Module.cwrap("add_video_frame", null, ["number", "number", "array"]);
 //assumes one second of floats, however many samples that is. frame = starting sample #
     _addAudioFrame = Module.cwrap("add_audio_frame", null, ["number", "number", "array"]);
